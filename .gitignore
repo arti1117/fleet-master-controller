@@ -1,0 +1,13 @@
+# Go build output
+/bin/
+*.exe
+*.test
+*.out
+
+# Coverage
+coverage.*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

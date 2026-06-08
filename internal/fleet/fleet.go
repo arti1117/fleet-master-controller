@@ -1,0 +1,148 @@
+// Package fleet is the controller core. It owns all mutable fleet state in a
+// single goroutine; callers interact only by submitting operations over a
+// channel (Go's "share memory by communicating"). This makes concurrent task
+// handling (demo ①) race-free by construction — no locks guard the assignment
+// map, because exactly one goroutine ever touches it.
+//
+// Every accepted assignment is durably appended to the ledger/WAL before it is
+// reflected in memory, so a crash leaves the WAL as the single source of truth
+// and recovery (demo ②) rebuilds the exact pre-crash state.
+package fleet
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/arti1117/fleet-master-controller/internal/event"
+	"github.com/arti1117/fleet-master-controller/internal/ledger"
+	"github.com/arti1117/fleet-master-controller/internal/recovery"
+)
+
+// Sentinel errors callers can match with errors.Is.
+var (
+	// ErrClosed is returned when an operation is submitted to a closed Core.
+	ErrClosed = errors.New("fleet: core is closed")
+	// ErrAlreadyAssigned is returned when a task is already held by a robot.
+	ErrAlreadyAssigned = errors.New("fleet: task already assigned")
+)
+
+// Clock returns the timestamp recorded for an event. Injectable so tests get
+// deterministic ledger hashes; production uses time.Now.
+type Clock func() time.Time
+
+// Core is the single-owner fleet state machine.
+type Core struct {
+	led       *ledger.Ledger
+	clock     Clock
+	ops       chan func()   // operations executed on the owner goroutine
+	quit      chan struct{} // closed by Close to stop the owner goroutine
+	stopped   chan struct{} // closed by run when it exits
+	closeOnce sync.Once
+
+	// assignments is owned exclusively by run(); never touched elsewhere.
+	assignments map[string]string // taskID -> robotID
+}
+
+// Option configures a Core.
+type Option func(*Core)
+
+// WithClock overrides the event clock (tests use a fixed clock).
+func WithClock(c Clock) Option { return func(core *Core) { core.clock = c } }
+
+// Open builds a Core whose state is recovered from led (which has already
+// replayed its on-disk WAL), then starts the owner goroutine.
+func Open(led *ledger.Ledger, opts ...Option) (*Core, error) {
+	st, err := recovery.Replay(led.Entries())
+	if err != nil {
+		return nil, err
+	}
+	c := &Core{
+		led:         led,
+		clock:       func() time.Time { return time.Now().UTC() },
+		ops:         make(chan func()),
+		quit:        make(chan struct{}),
+		stopped:     make(chan struct{}),
+		assignments: st.Assignments,
+	}
+	for _, o := range opts {
+		o(c)
+	}
+	go c.run()
+	return c, nil
+}
+
+func (c *Core) run() {
+	defer close(c.stopped)
+	for {
+		select {
+		case op := <-c.ops:
+			op()
+		case <-c.quit:
+			return
+		}
+	}
+}
+
+// submit runs fn on the owner goroutine and returns fn's error, or ErrClosed if
+// the Core has been closed. This is the one place caller goroutines hand work
+// to the owner; everything mutable is touched only inside fn, on that goroutine.
+func (c *Core) submit(fn func() error) error {
+	reply := make(chan error, 1)
+	select {
+	case c.ops <- func() { reply <- fn() }:
+		return <-reply
+	case <-c.quit:
+		return ErrClosed
+	}
+}
+
+// AssignTask grants taskID to robotID. It is collision-free: a task already
+// assigned is rejected with ErrAlreadyAssigned (demo ①). The assignment is
+// durably logged before it is acknowledged (demo ②/③); a ledger error is
+// propagated and the in-memory state is left untouched.
+func (c *Core) AssignTask(taskID, robotID string) error {
+	return c.submit(func() error {
+		if cur, exists := c.assignments[taskID]; exists {
+			return fmt.Errorf("%w: %q held by %q", ErrAlreadyAssigned, taskID, cur)
+		}
+		payload, err := json.Marshal(event.Assign{TaskID: taskID, RobotID: robotID})
+		if err != nil {
+			return err
+		}
+		if _, err := c.led.Append(c.clock(), event.KindAssign, payload); err != nil {
+			return err // not durably committed -> not assigned (WAL is the source of truth)
+		}
+		c.assignments[taskID] = robotID
+		return nil
+	})
+}
+
+// Snapshot returns a copy of the current taskID -> robotID assignments, or nil
+// if the Core has been closed.
+func (c *Core) Snapshot() map[string]string {
+	reply := make(chan map[string]string, 1)
+	select {
+	case c.ops <- func() {
+		m := make(map[string]string, len(c.assignments))
+		for k, v := range c.assignments {
+			m[k] = v
+		}
+		reply <- m
+	}:
+		return <-reply
+	case <-c.quit:
+		return nil
+	}
+}
+
+// Close stops the owner goroutine. It is idempotent and safe to call
+// concurrently. The ledger/WAL is the caller's to close.
+func (c *Core) Close() {
+	c.closeOnce.Do(func() {
+		close(c.quit)
+		<-c.stopped
+	})
+}
