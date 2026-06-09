@@ -120,6 +120,36 @@ func (c *Core) AssignTask(taskID, robotID string) error {
 	})
 }
 
+// RecordOrder logs that the controller issued a VDA5050 order (update) to a
+// robot. It does not change the assignment projection — it feeds the audit
+// ledger that internal/reconcile reads to prove command acceptance.
+func (c *Core) RecordOrder(robotID, orderID string, updateID uint32, taskID string) error {
+	return c.submit(func() error {
+		payload, err := json.Marshal(event.OrderIssued{
+			RobotID: robotID, OrderID: orderID, OrderUpdateID: updateID, TaskID: taskID,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = c.led.Append(c.clock(), event.KindOrderIssued, payload)
+		return err
+	})
+}
+
+// RecordState logs a VDA5050 state report from a robot (the fields reconcile needs).
+func (c *Core) RecordState(robotID, orderID string, updateID uint32, driving bool) error {
+	return c.submit(func() error {
+		payload, err := json.Marshal(event.StateReported{
+			RobotID: robotID, OrderID: orderID, OrderUpdateID: updateID, Driving: driving,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = c.led.Append(c.clock(), event.KindStateReported, payload)
+		return err
+	})
+}
+
 // Snapshot returns a copy of the current taskID -> robotID assignments, or nil
 // if the Core has been closed.
 func (c *Core) Snapshot() map[string]string {

@@ -53,13 +53,51 @@ adversarial review. What it proves today:
 - Caller supplies the timestamp (no hidden clock) so replay is deterministic.
 - The WAL **is** the audit ledger: P2 recovery and P3 audit are one artifact.
 
+## Command-acceptance accountability (`internal/reconcile`) — DONE
+
+The audit ledger's payoff. `Reconcile(entries)` is a pure, deterministic fold
+that classifies each issued `(robot, order)` by comparing the controller's
+issued `orderUpdateId` against what the robot reported:
+
+- `ACCEPTED` — robot's latest state reported `orderUpdateId >= issued`.
+- `PENDING` — robot behind but still `driving` (likely applying the update).
+- `STALLED` — robot behind and **not driving** as of its last state → issued
+  update **unconfirmed** (could be a mid-order pause or a stuck robot — the ledger
+  alone cannot tell).
+- `UNOBSERVED` — order issued, no state references it → unconfirmed.
+
+Honesty boundary (from adversarial review): the fold proves *confirmation*, not
+the robot's *intent*. `driving=false` is **non-terminal** in VDA5050 (a robot
+pauses to stop at nodes, run load/unload actions, or wait), so STALLED is named
+"unconfirmed", **not** "rejected" — and it is **not** the spec's
+`SAME_ORDER_UPDATE_ID` condition (that is same-id + *different content*, a
+WARNING). Proving true rejection needs the robot's error/terminal signals
+(lastNodeId, actionStates, errors) — the next layer. An identical re-issue is
+idempotent (one finding). Verdict, `ObservedUpdateID`, and prose all come from
+the same latest report. Orphan states (a report for an order never issued) are
+out of scope here. Next refinement: an idle/order-completion signal to harden
+STALLED, and an `UNSOLICITED` finding for orphan activity.
+
+## VDA5050 grounding (verified against github.com/VDA5050/VDA5050, 2026-06)
+
+- **Target = v2.x** (deliberate: widely deployed; v3.0.0 only shipped 2026-03-19).
+- `(orderId, orderUpdateId)` is the protocol idempotency key. Identical resend →
+  ignored (no-op). Same `orderUpdateId`, different content → error
+  **`SAME_ORDER_UPDATE_ID`, level `WARNING`** (not fatal; the legacy v1.1 term
+  `orderUpdateError` was a *different*, lower-`orderUpdateId` case — do not use it).
+- Battery: v2.x = `batteryState`/`batteryCharge` (what this repo models). The
+  rename to `powerSupply`/`stateOfCharge` is **v3.0.0**, not 2.1.0 — it is the
+  canonical real example for the future `schema_version` upcasting work.
+- `blockingType` enum has **4** values: NONE / SOFT / HARD / SINGLE.
+
 ## Roadmap
 
 1. **[done]** 0-stage slice: durable WAL + recovery + P3 ledger, hardened.
-2. **[next]** P2 deepen: snapshot + compaction so recovery isn't O(history); explicit "kill -9 mid-order" demo.
-3. P1: contended allocation under load, `-race` stress; document the single-owner proof.
-4. P4: reconcile loop (desired vs actual) — robot dropout via VDA5050 connection/last-will → re-`Append` "reassign"; kill-a-robot conservation test.
-5. VDA5050 MQTT transport (`internal/vda5050` ↔ broker), end-to-end with simulated AGVs.
+2. **[done]** command-acceptance accountability (`internal/reconcile`).
+3. **[next]** P2 deepen: snapshot + compaction so recovery isn't O(history); explicit "kill -9 mid-order" demo.
+4. P1: contended allocation under load, `-race` stress; document the single-owner proof.
+5. P4: reconcile loop (desired vs actual) — robot dropout via VDA5050 connection/last-will → re-`Append` "reassign"; kill-a-robot conservation test.
+6. VDA5050 MQTT transport (`internal/vda5050` ↔ broker), end-to-end with simulated AGVs; idle-timeout to harden PENDING.
 
 ## Documented limitations (deliberately deferred — not bugs in the slice)
 

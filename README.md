@@ -1,57 +1,73 @@
 # fleet-master-controller
 
-A VDA5050-compliant fleet master controller, built to demonstrate **operational
-reliability for autonomous fleets** — the same distributed-systems guarantees
-that matter in financial settlement, applied to coordinating many robots.
+**An audit & deterministic replay layer for robot fleets** (VDA5050) — built to
+demonstrate that distributed-systems reliability is *domain-independent*: the
+same guarantees that keep money consistent in financial settlement, applied to
+coordinating many robots.
 
 > Thesis: keeping *N* independent agents consistent under partial failure is the
-> same problem whether the agents move money or move pallets. This project is the
-> proof.
+> same problem whether the agents move money or move pallets. This repo is the proof.
 
-## The four reliability demos
+## Reliability properties
 
-| # | Demo | Property proven | Package |
-|---|------|-----------------|---------|
-| ① | Collision-free concurrent task allocation | No task assigned twice, none dropped, under concurrent claims | `internal/allocator` |
-| ② | Exactly-once crash recovery | Restart from the audit log reproduces pre-crash state — no loss, no duplication | `internal/recovery` |
-| ③ | **Tamper-evident audit ledger** | Any edit/deletion/reorder of history is detected (hash-chained, append-only) | `internal/ledger` |
-| ④ | Graceful dropout reassignment | A robot dropping out → its tasks reclaimed exactly once by healthy robots | `internal/reassign` |
+| Property | Status | Package |
+|----------|--------|---------|
+| **Tamper-evident audit ledger** — any edit/deletion/reorder of history is detected (hash-chained, append-only); doubles as the durable WAL | ✅ done | `internal/ledger` |
+| **Exactly-once crash recovery** — a fresh process rebuilds exact pre-crash state by replaying the WAL (deterministic, idempotent fold) | ✅ done (slice) | `internal/recovery` |
+| **Command-acceptance accountability** — prove, purely from the ledger, whether every issued VDA5050 order was accepted by its robot: `ACCEPTED / PENDING / LOST / DIVERGED` | ✅ done | `internal/reconcile` |
+| Collision-free concurrent task allocation — no task assigned twice under concurrent claims | ◐ seed (in `fleet`) | `internal/allocator` |
+| Graceful dropout reassignment — a robot dropping out → its tasks reclaimed exactly once | ✗ next | `internal/reassign` |
 
-Demo ③ is the differentiator: an append-only, hash-chained audit log where every
-control decision is provable after the fact. **It is implemented and tested
-now**; ①②④ are scaffolded with their interfaces and the property each must prove.
+The audit ledger is the spine: crash recovery replays it, and the reconciliation
+layer reads it to make command acceptance provable after the fact — the fleet
+analogue of financial settlement reconciliation (sent instruction vs confirmation).
 
 ## Layout
 
 ```
-cmd/controller/      entry point (runs the ③ ledger demo today)
-internal/ledger/     ③ hash-chained append-only audit log  [implemented + tested]
-internal/allocator/  ① collision-free concurrent allocation [interface]
-internal/recovery/   ② exactly-once replay from the ledger  [interface]
-internal/reassign/   ④ dropout reassignment                 [interface]
-internal/vda5050/    VDA5050 v2.0 message types + MQTT topic helpers
-docs/design.md       reliability properties + roadmap
+cmd/controller/      CLI: assign / recover / verify / record-order / record-state / reconcile
+internal/ledger/     hash-chained append-only audit log = durable WAL   [done]
+internal/recovery/   deterministic replay (fold) of the ledger          [done]
+internal/fleet/      single-goroutine Core: owns state, channel ops      [done]
+internal/reconcile/  command-state reconciliation (accountability)       [done]
+internal/event/      shared event vocabulary
+internal/vda5050/    VDA5050 v2.x message types + MQTT topic helpers      [types only]
+internal/allocator/  collision-free allocation                           [interface]
+internal/reassign/   dropout reassignment                                [interface]
+docs/design.md       reliability properties, crash semantics, roadmap
 ```
 
 ## Run
 
 ```bash
-go test -race ./...                                   # all reliability properties, race-clean
+go test -race ./...
+
+# crash recovery: assign in one process, recover in another
 go run ./cmd/controller assign  /tmp/fleet.wal agv-01 pick-A pick-B
-go run ./cmd/controller recover /tmp/fleet.wal        # fresh process rebuilds state from the WAL
-go run ./cmd/controller verify  /tmp/fleet.wal        # audit-chain integrity check
+go run ./cmd/controller recover /tmp/fleet.wal
+go run ./cmd/controller verify  /tmp/fleet.wal
+
+# accountability: issue an order update the robot never accepts -> DIVERGED
+go run ./cmd/controller record-order /tmp/fleet.wal agv-01 ORD-1 2
+go run ./cmd/controller record-state /tmp/fleet.wal agv-01 ORD-1 1 false
+go run ./cmd/controller reconcile    /tmp/fleet.wal      # exits nonzero on LOST/DIVERGED
 ```
 
 ## Standard
 
-[VDA5050](https://www.vda.de/en/news/publications/publication/vda-5050-v2.0)
-v2.0 — the German automotive-industry interface between fleet controllers and
-AGVs/AMRs (MQTT + JSON). Modeled subset lives in `internal/vda5050`.
+[VDA5050](https://github.com/VDA5050/VDA5050) — the interface between fleet
+controllers and AGVs/AMRs (MQTT + JSON). This repo targets **v2.x** (the widely
+deployed line; v3.0.0 shipped 2026-03). `(orderId, orderUpdateId)` is the
+protocol's idempotency key — the direct analogue of a payment idempotency key:
+an identical re-issue is a no-op, while the same `orderUpdateId` with *different
+content* is the spec's `SAME_ORDER_UPDATE_ID` WARNING. (The reconciler's
+`STALLED`/`UNOBSERVED` are a separate, honest "unconfirmed" signal — not that
+condition.)
 
 ## Status
 
-0-stage vertical slice **done & hardened**: durable WAL = the P3 hash-chain
-ledger, P2 exactly-once recovery across a simulated crash (incl. torn-tail and
-single-writer handling), P1 single-owner concurrency seed. ①②④ deepen next — see
-[`docs/design.md`](docs/design.md). Built as Phase A career-pivot evidence toward
+Audit ledger, exactly-once recovery (slice), and command-acceptance accountability
+are done and `-race`-clean. P1 deepening and dropout reassignment next; MQTT
+ingestion to feed real VDA5050 traffic after. See
+[`docs/design.md`](docs/design.md). Phase A career-pivot evidence toward
 autonomous-fleet orchestration.

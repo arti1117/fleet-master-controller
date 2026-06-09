@@ -42,6 +42,10 @@ func Replay(entries []ledger.Entry) (State, error) {
 				return State{}, fmt.Errorf("recovery: decode reassign at index %d: %w", e.Index, err)
 			}
 			st.Assignments[r.TaskID] = r.ToRobot
+		case event.KindOrderIssued, event.KindStateReported:
+			// Not part of the assignment projection — these are consumed by
+			// internal/reconcile (command-state accountability). Accepted here
+			// so they do not trip the fail-closed default during recovery.
 		default:
 			// Fail closed: an unknown kind means either a newer writer wrote a
 			// record this version cannot interpret, or the log is corrupt.
