@@ -19,6 +19,43 @@ guarantees as fintech exactly-once processing, re-expressed for tasks. Demo ③
 (hash-chained ledger) is the auditable record that makes both provable after the
 fact. Demo ④ is the fleet-specific failure mode (Kubernetes-style reconcile).
 
+## Core flows
+
+Durable write → crash → recovery, and accountability — all over the one WAL:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Op as Operator / CLI
+    participant Core as fleet.Core (single-goroutine owner)
+    participant WAL as ledger (hash-chained WAL)
+    participant Rec as recovery.Replay
+    participant Con as reconcile.Reconcile
+
+    Note over Op,WAL: Write path — logged durably BEFORE it is acknowledged
+    Op->>Core: AssignTask / RecordOrder / RecordState
+    Core->>WAL: Append(ts, kind, payload)
+    WAL->>WAL: write line + fsync (durable)
+    WAL-->>Core: Entry (committed)
+    Core-->>Op: ack (only after durable)
+
+    Note over Op,WAL: ---- process crash ----
+
+    Note over Op,Rec: Recovery — rebuild exact state from the WAL alone
+    Op->>WAL: Open(path)
+    WAL->>WAL: replay (drop torn tail) + Verify hash chain
+    WAL->>Rec: Entries()
+    Rec-->>Op: State — no loss, no duplication
+
+    Note over Op,Con: Accountability — prove command acceptance from the log
+    Op->>WAL: Open(path)
+    WAL->>Con: Entries()
+    Con->>Con: pure fold (issued vs reported orderUpdateId)
+    Con-->>Op: Findings: ACCEPTED / PENDING / STALLED / UNOBSERVED
+```
+
+The `.mmd` sources are in `docs/` (`architecture.mmd`, `Sequence.mmd`).
+
 ## 0-stage vertical slice — DONE (2026-06-08)
 
 Robot + task + durable WAL + crash recovery, one full pass, hardened after an

@@ -22,6 +22,29 @@ The audit ledger is the spine: crash recovery replays it, and the reconciliation
 layer reads it to make command acceptance provable after the fact — the fleet
 analogue of financial settlement reconciliation (sent instruction vs confirmation).
 
+## Architecture
+
+One durable, ordered, tamper-evident truth; one writer; two pure-fold readers.
+
+```mermaid
+flowchart LR
+    CLI["CLI<br/>assign · record-order · record-state"]
+    Core["fleet.Core<br/>single goroutine owns state<br/>(channel ops, no locks)"]
+    WAL[("ledger<br/>append-only, hash-chained WAL<br/>fsync per record<br/>= single source of truth")]
+    Rec["recovery.Replay<br/>pure fold → assignment State<br/>(exactly-once recovery)"]
+    Con["reconcile.Reconcile<br/>pure fold → Findings<br/>(command accountability)"]
+    Verify{{"Verify()<br/>tamper / reorder detection"}}
+
+    CLI --> Core
+    Core -->|"Append: marshal → write → fsync<br/>(durable before ack)"| WAL
+    WAL -->|"Entries()"| Rec
+    WAL -->|"Entries()"| Con
+    WAL -.-> Verify
+
+    Rec --> StateOut["State: taskID → robotID"]
+    Con --> FindOut["ACCEPTED / PENDING / STALLED / UNOBSERVED"]
+```
+
 ## Layout
 
 ```
