@@ -14,7 +14,7 @@ coordinating many robots.
 |----------|--------|---------|
 | **Tamper-evident audit ledger** — any edit/deletion/reorder of history is detected (hash-chained, append-only); doubles as the durable WAL | ✅ done | `internal/ledger` |
 | **Exactly-once crash recovery** — a fresh process rebuilds exact pre-crash state by replaying the WAL (deterministic, idempotent fold) | ✅ done (slice) | `internal/recovery` |
-| **Command-acceptance accountability** — prove, purely from the ledger, whether every issued VDA5050 order was accepted by its robot: `ACCEPTED / PENDING / LOST / DIVERGED` | ✅ done | `internal/reconcile` |
+| **Command-acceptance accountability** — prove, purely from the ledger, whether every issued VDA5050 order was accepted by its robot: `ACCEPTED / PENDING / STALLED / UNOBSERVED` | ✅ done | `internal/reconcile` |
 | Collision-free concurrent task allocation — no task assigned twice under concurrent claims | ◐ seed (in `fleet`) | `internal/allocator` |
 | Graceful dropout reassignment — a robot dropping out → its tasks reclaimed exactly once | ✗ next | `internal/reassign` |
 
@@ -70,10 +70,10 @@ go run ./cmd/controller assign  /tmp/fleet.wal agv-01 pick-A pick-B
 go run ./cmd/controller recover /tmp/fleet.wal
 go run ./cmd/controller verify  /tmp/fleet.wal
 
-# accountability: issue an order update the robot never accepts -> DIVERGED
+# accountability: issue an order update the robot lags on -> STALLED
 go run ./cmd/controller record-order /tmp/fleet.wal agv-01 ORD-1 2
 go run ./cmd/controller record-state /tmp/fleet.wal agv-01 ORD-1 1 false
-go run ./cmd/controller reconcile    /tmp/fleet.wal      # exits nonzero on LOST/DIVERGED
+go run ./cmd/controller reconcile    /tmp/fleet.wal      # exits nonzero on STALLED/UNOBSERVED
 ```
 
 ## Standard
