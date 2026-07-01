@@ -176,3 +176,69 @@ func TestConcurrentAssign_DistinctTasks(t *testing.T) {
 		t.Fatalf("chain broken under concurrency at %d: %v", broken, err)
 	}
 }
+
+// P1 acceptance (load): N racers contend for each of M tasks — 1,600 goroutines
+// at once. Every task must get exactly one winner (winner total == task count),
+// losers must be rejected with ErrAlreadyAssigned before touching the WAL
+// (exactly one durable entry per task), and the whole run must be -race clean.
+func TestStress_ManyContendedTasks_ExactlyOneWinnerEach(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fleet.wal")
+	led, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer led.Close()
+	core, err := fleet.Open(led, fleet.WithClock(testClock()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer core.Close()
+
+	const (
+		tasks         = 100
+		racersPerTask = 16
+	)
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		wins = make(map[string]int, tasks) // taskID -> number of successful claims
+	)
+	for ti := 0; ti < tasks; ti++ {
+		taskID := fmt.Sprintf("task-%03d", ti)
+		for r := 0; r < racersPerTask; r++ {
+			wg.Add(1)
+			go func(taskID, robotID string) {
+				defer wg.Done()
+				switch err := core.AssignTask(taskID, robotID); {
+				case err == nil:
+					mu.Lock()
+					wins[taskID]++
+					mu.Unlock()
+				case !errors.Is(err, fleet.ErrAlreadyAssigned):
+					t.Errorf("AssignTask(%s, %s): unexpected error: %v", taskID, robotID, err)
+				}
+			}(taskID, fmt.Sprintf("agv-%02d", r))
+		}
+	}
+	wg.Wait()
+
+	total := 0
+	for taskID, n := range wins {
+		if n != 1 {
+			t.Errorf("%s: %d winners, want exactly 1", taskID, n)
+		}
+		total += n
+	}
+	if total != tasks {
+		t.Fatalf("winner total = %d, want %d (one per task)", total, tasks)
+	}
+	if got := len(core.Snapshot()); got != tasks {
+		t.Fatalf("snapshot holds %d assignments, want %d", got, tasks)
+	}
+	if led.Len() != tasks {
+		t.Fatalf("ledger has %d entries, want %d (losers must never reach the WAL)", led.Len(), tasks)
+	}
+	if broken, err := led.Verify(); broken != -1 || err != nil {
+		t.Fatalf("audit chain broken under load at %d: %v", broken, err)
+	}
+}
