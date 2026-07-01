@@ -63,7 +63,7 @@ adversarial review. What it proves today:
 
 - **P3** hash-chained append-only ledger; interior tamper/reorder detected by `Verify`.
 - **P2** exactly-once recovery: a fresh process rebuilds the exact assignment set from the WAL.
-- **P1 seed** single goroutine owns the assignment map; 32-racer contended task → exactly one winner (`-race` clean).
+- **P1 seed** single goroutine owns the assignment map; 32-racer contended task → exactly one winner (`-race` clean). Since deepened to full P1 — see below.
 - Collision-free assignment; `ErrAlreadyAssigned` / `ErrClosed` sentinels.
 
 ### Crash semantics (implemented — the subtle part)
@@ -115,6 +115,28 @@ the same latest report. Orphan states (a report for an order never issued) are
 out of scope here. Next refinement: an idle/order-completion signal to harden
 STALLED, and an `UNSOLICITED` finding for orphan activity.
 
+## P1 — collision-free allocation under load (`internal/fleet`) — DONE (2026-07-02)
+
+**The single-owner proof, made structural.** All fleet state is one map that
+exists only as a local variable of the owner goroutine (`Core.run`). It is not
+a struct field: no other method can even name it, so exclusive ownership is
+enforced by the compiler — not by a lock, and not by reviewer discipline. The
+only way to read or write fleet state is to send a closure into the ops
+channel; the owner executes closures one at a time, so handing the map to a
+closure never exposes it to a second concurrent goroutine.
+
+Acceptance (`TestStress_ManyContendedTasks_ExactlyOneWinnerEach`): 16 racers ×
+100 tasks (1,600 goroutines) under `-race` — every task gets exactly one
+winner, the winner total equals the task count, and the ledger holds exactly
+one durable entry per task (losers are rejected in memory, before the WAL).
+
+Trade-off (deliberate): a single owner serializes every state operation, so
+throughput is bounded by one op at a time × one fsync per accepted append
+(~2.3 ms/fsync ≈ ~440 accepted appends/s measured on the dev machine). Group
+commit is the known lever if that ceiling is ever hit; it is deliberately not
+built — nothing here is near the ceiling, and correctness stays simpler
+without it.
+
 ## VDA5050 grounding (verified against github.com/VDA5050/VDA5050, 2026-06)
 
 - **Target = v2.x** (deliberate: widely deployed; v3.0.0 only shipped 2026-03-19).
@@ -131,15 +153,16 @@ STALLED, and an `UNSOLICITED` finding for orphan activity.
 
 1. **[done]** 0-stage slice: durable WAL + recovery + P3 ledger, hardened.
 2. **[done]** command-acceptance accountability (`internal/reconcile`).
-3. **[next]** P2 deepen: snapshot + compaction so recovery isn't O(history); explicit "kill -9 mid-order" demo.
-4. P1: contended allocation under load, `-race` stress; document the single-owner proof.
-5. P4: reconcile loop (desired vs actual) — robot dropout via VDA5050 connection/last-will → re-`Append` "reassign"; kill-a-robot conservation test.
-6. VDA5050 MQTT transport (`internal/vda5050` ↔ broker), end-to-end with simulated AGVs; idle-timeout to harden PENDING.
+3. **[done]** explicit "kill -9" crash-recovery demo (`scripts/kill9-demo.sh`): random-timing SIGKILL, clean-prefix recovery, chain intact.
+4. **[done]** P1: contended allocation under load, `-race` stress; single-owner proof made structural and documented (above).
+5. **[next]** P4: reconcile loop (desired vs actual) — robot dropout via VDA5050 connection/last-will as a fast-path *hint*, with a lease as the death *verdict*; fencing token (epoch) so a returned robot's late completion is rejected (and the rejection itself is ledgered); reclaim re-`Append`ed as "reassign"; kill-a-robot conservation test.
+6. P2 deepen: snapshot + compaction so recovery isn't O(history) — checkpoint entries appended in-chain + archived segments, never head truncation (which would break `Verify`). Deliberately last.
+7. VDA5050 MQTT transport (`internal/vda5050` ↔ broker), end-to-end with simulated AGVs; idle-timeout to harden PENDING.
 
 ## Documented limitations (deliberately deferred — not bugs in the slice)
 
 - **No WAL compaction yet**: `Open` replays the whole history into memory. Fine
-  for the slice; snapshotting is roadmap item 2.
+  for the slice; snapshotting is roadmap item 6.
 - **`Snapshot` on a closed Core returns nil** (vs an explicit ok/closed signal).
   Acceptable for the CLI, which only snapshots live cores.
 - **`run()` goroutine requires `Close`**: leaking it is a caller contract

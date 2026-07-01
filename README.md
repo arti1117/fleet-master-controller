@@ -15,7 +15,7 @@ coordinating many robots.
 | **Tamper-evident audit ledger** — any edit/deletion/reorder of history is detected (hash-chained, append-only); doubles as the durable WAL | ✅ done | `internal/ledger` |
 | **Exactly-once crash recovery** — a fresh process rebuilds exact pre-crash state by replaying the WAL (deterministic, idempotent fold) | ✅ done (slice) | `internal/recovery` |
 | **Command-acceptance accountability** — prove, purely from the ledger, whether every issued VDA5050 order was accepted by its robot: `ACCEPTED / PENDING / STALLED / UNOBSERVED` | ✅ done | `internal/reconcile` |
-| Collision-free concurrent task allocation — no task assigned twice under concurrent claims | ◐ seed (in `fleet`) | `internal/allocator` |
+| **Collision-free concurrent task allocation** — no task assigned twice under contended concurrent claims; all state owned by a single goroutine, ownership enforced by the compiler | ✅ done | `internal/fleet` |
 | Graceful dropout reassignment — a robot dropping out → its tasks reclaimed exactly once | ✗ next | `internal/reassign` |
 
 The audit ledger is the spine: crash recovery replays it, and the reconciliation
@@ -55,7 +55,6 @@ internal/fleet/      single-goroutine Core: owns state, channel ops      [done]
 internal/reconcile/  command-state reconciliation (accountability)       [done]
 internal/event/      shared event vocabulary
 internal/vda5050/    VDA5050 v2.x message types + MQTT topic helpers      [types only]
-internal/allocator/  collision-free allocation                           [interface]
 internal/reassign/   dropout reassignment                                [interface]
 docs/design.md       reliability properties, crash semantics, roadmap
 ```
@@ -89,8 +88,9 @@ condition.)
 
 ## Status
 
-Audit ledger, exactly-once recovery (slice), and command-acceptance accountability
-are done and `-race`-clean. P1 deepening and dropout reassignment next; MQTT
-ingestion to feed real VDA5050 traffic after. See
+Audit ledger, exactly-once recovery (slice), command-acceptance accountability,
+and collision-free allocation under contended load are done and `-race`-clean.
+Dropout reassignment (P4: lease + fencing) is next, snapshot/compaction after;
+MQTT ingestion to feed real VDA5050 traffic after that. See
 [`docs/design.md`](docs/design.md). Phase A career-pivot evidence toward
 autonomous-fleet orchestration.
